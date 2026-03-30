@@ -8,9 +8,9 @@ from app.metrics import MetricsService
 def build_payload(domain: str = "verno.pro") -> dict:
     return {
         "model": "gpt-5-mini",
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
+        "text": {
+            "format": {
+                "type": "json_schema",
                 "name": "SiteClassification",
                 "schema": {
                     "type": "object",
@@ -22,22 +22,32 @@ def build_payload(domain: str = "verno.pro") -> dict:
                     },
                     "required": ["site_verdict", "detected_city", "confidence", "reason"],
                 },
-            },
+            }
         },
-        "messages": [
+        "input": [
             {
                 "role": "system",
-                "content": (
-                    "Определи тип сайта и фактический город по ограниченному контексту. "
-                    "Если уверенности нет, верни verdict=uncertain."
-                ),
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Определи тип сайта и фактический город по ограниченному контексту. "
+                            "Если уверенности нет, верни verdict=uncertain."
+                        ),
+                    }
+                ],
             },
             {
                 "role": "user",
-                "content": (
-                    '{"expected_city":"Краснодар","expected_entity_type":"real_estate_agency",'
-                    f'"domain":"{domain}","homepage_excerpt":"Каталог объектов и контакты."}}'
-                ),
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            '{"expected_city":"Краснодар","expected_entity_type":"real_estate_agency",'
+                            f'"domain":"{domain}","homepage_excerpt":"Каталог объектов и контакты."}}'
+                        ),
+                    }
+                ],
             },
         ],
     }
@@ -54,37 +64,37 @@ def test_healthcheck(client) -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_relay_chat_completions_success(client) -> None:
-    response = client.post("/v1/openai/chat-completions", headers=auth_headers(), json=build_payload())
+def test_relay_responses_success(client) -> None:
+    response = client.post("/v1/openai/responses", headers=auth_headers(), json=build_payload())
 
     assert response.status_code == 200
     body = response.json()
-    assert body["object"] == "chat.completion"
+    assert body["object"] == "response"
     assert body["model"] == "gpt-5-mini"
-    assert body["choices"][0]["message"]["role"] == "assistant"
+    assert "site_verdict" in body["output_text"]
 
 
-def test_relay_chat_completions_requires_token(client) -> None:
-    response = client.post("/v1/openai/chat-completions", json=build_payload())
+def test_relay_responses_requires_token(client) -> None:
+    response = client.post("/v1/openai/responses", json=build_payload())
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "unauthorized"
 
 
-def test_relay_chat_completions_returns_400_for_invalid_payload(client) -> None:
+def test_relay_responses_returns_400_for_invalid_payload(client) -> None:
     response = client.post(
-        "/v1/openai/chat-completions",
+        "/v1/openai/responses",
         headers=auth_headers(),
-        json={"model": "gpt-5-mini", "messages": []},
+        json={"model": "gpt-5-mini", "input": []},
     )
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
 
 
-def test_relay_chat_completions_returns_400_for_large_payload(client) -> None:
+def test_relay_responses_returns_400_for_large_payload(client) -> None:
     response = client.post(
-        "/v1/openai/chat-completions",
+        "/v1/openai/responses",
         headers={**auth_headers(), "content-length": "999999"},
         content=b"{}",
     )
@@ -93,34 +103,34 @@ def test_relay_chat_completions_returns_400_for_large_payload(client) -> None:
     assert response.json()["error"]["code"] == "payload_too_large"
 
 
-def test_relay_chat_completions_returns_502_for_upstream_error(client, fake_openai_client) -> None:
+def test_relay_responses_returns_502_for_upstream_error(client, fake_openai_client) -> None:
     fake_openai_client.exception = UpstreamError()
 
-    response = client.post("/v1/openai/chat-completions", headers=auth_headers(), json=build_payload())
+    response = client.post("/v1/openai/responses", headers=auth_headers(), json=build_payload())
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "upstream_invalid_response"
 
 
-def test_relay_chat_completions_returns_504_for_timeout(client, fake_openai_client) -> None:
+def test_relay_responses_returns_504_for_timeout(client, fake_openai_client) -> None:
     fake_openai_client.exception = UpstreamTimeoutError()
 
-    response = client.post("/v1/openai/chat-completions", headers=auth_headers(), json=build_payload())
+    response = client.post("/v1/openai/responses", headers=auth_headers(), json=build_payload())
 
     assert response.status_code == 504
     assert response.json()["error"]["code"] == "upstream_timeout"
 
 
-def test_relay_chat_completions_returns_429_when_rate_limited(settings, fake_openai_client) -> None:
+def test_relay_responses_returns_429_when_rate_limited(settings, fake_openai_client) -> None:
     settings.rate_limit_requests = 1
     app = create_app(settings=settings, metrics=MetricsService(), openai_client=fake_openai_client)
 
     from fastapi.testclient import TestClient
 
     with TestClient(app) as test_client:
-        first = test_client.post("/v1/openai/chat-completions", headers=auth_headers(), json=build_payload())
+        first = test_client.post("/v1/openai/responses", headers=auth_headers(), json=build_payload())
         second = test_client.post(
-            "/v1/openai/chat-completions",
+            "/v1/openai/responses",
             headers=auth_headers(),
             json=build_payload("second.example"),
         )
@@ -134,7 +144,7 @@ def test_relay_uses_default_model_when_missing(client, fake_openai_client) -> No
     payload = build_payload()
     payload.pop("model")
 
-    response = client.post("/v1/openai/chat-completions", headers=auth_headers(), json=payload)
+    response = client.post("/v1/openai/responses", headers=auth_headers(), json=payload)
 
     assert response.status_code == 200
     assert response.json()["model"] == "gpt-5-mini"

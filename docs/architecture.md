@@ -1,64 +1,66 @@
-# Архитектура LLM relay
+﻿# РђСЂС…РёС‚РµРєС‚СѓСЂР° LLM relay
 
-## Назначение
+## РќР°Р·РЅР°С‡РµРЅРёРµ
 
-`llm-connector` — это тонкий HTTP relay для OpenAI `chat/completions`. Он нужен, чтобы основной pipeline мог сохранить всю prompt-логику у себя, а на второй сервер вынести только сетевой доступ к OpenAI.
+`llm-connector` вЂ” СЌС‚Рѕ С‚РѕРЅРєРёР№ HTTP relay РґР»СЏ OpenAI `responses`. РћРЅ РЅСѓР¶РµРЅ, С‡С‚РѕР±С‹ РѕСЃРЅРѕРІРЅРѕР№ pipeline РјРѕРі СЃРѕС…СЂР°РЅРёС‚СЊ РІСЃСЋ prompt-Р»РѕРіРёРєСѓ Сѓ СЃРµР±СЏ, Р° РЅР° РІС‚РѕСЂРѕР№ СЃРµСЂРІРµСЂ РІС‹РЅРµСЃС‚Рё С‚РѕР»СЊРєРѕ СЃРµС‚РµРІРѕР№ РґРѕСЃС‚СѓРї Рє OpenAI.
 
-## Слои
+## РЎР»РѕРё
 
-- `app/main.py` — FastAPI-приложение, auth, middleware, health/readiness/metrics, endpoint relay.
-- `app/schemas.py` — минимальная валидация входного OpenAI payload и error schema.
-- `app/openai_client.py` — обертка над OpenAI SDK с timeout/retry.
-- `app/service.py` — тонкий сервисный слой, который только вызывает upstream и пишет метрики.
-- `app/rate_limit.py` и `app/metrics.py` — локальный rate limit и prometheus-метрики.
+- `app/main.py` вЂ” FastAPI-РїСЂРёР»РѕР¶РµРЅРёРµ, auth, middleware, health/readiness/metrics, endpoint relay.
+- `app/schemas.py` вЂ” РјРёРЅРёРјР°Р»СЊРЅР°СЏ РІР°Р»РёРґР°С†РёСЏ РІС…РѕРґРЅРѕРіРѕ OpenAI payload Рё error schema.
+- `app/openai_client.py` вЂ” РѕР±РµСЂС‚РєР° РЅР°Рґ OpenAI SDK СЃ timeout/retry.
+- `app/service.py` вЂ” С‚РѕРЅРєРёР№ СЃРµСЂРІРёСЃРЅС‹Р№ СЃР»РѕР№, РєРѕС‚РѕСЂС‹Р№ С‚РѕР»СЊРєРѕ РІС‹Р·С‹РІР°РµС‚ upstream Рё РїРёС€РµС‚ РјРµС‚СЂРёРєРё.
+- `app/rate_limit.py` Рё `app/metrics.py` вЂ” Р»РѕРєР°Р»СЊРЅС‹Р№ rate limit Рё prometheus-РјРµС‚СЂРёРєРё.
 
-## Поток запроса
+## РџРѕС‚РѕРє Р·Р°РїСЂРѕСЃР°
 
-1. Клиент присылает `POST /v1/openai/chat-completions`.
-2. Приложение проверяет Bearer token и IP allowlist.
-3. Payload валидируется минимально: должны быть `messages`, прочие OpenAI-поля пропускаются как есть.
-4. Relay вызывает OpenAI через официальный SDK.
-5. Ответ `chat.completion` возвращается клиенту без доменной нормализации.
+1. РљР»РёРµРЅС‚ РїСЂРёСЃС‹Р»Р°РµС‚ `POST /v1/openai/responses`.
+2. РџСЂРёР»РѕР¶РµРЅРёРµ РїСЂРѕРІРµСЂСЏРµС‚ Bearer token Рё IP allowlist.
+3. Payload РІР°Р»РёРґРёСЂСѓРµС‚СЃСЏ РјРёРЅРёРјР°Р»СЊРЅРѕ: РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ `input`, РїСЂРѕС‡РёРµ OpenAI-РїРѕР»СЏ РїСЂРѕРїСѓСЃРєР°СЋС‚СЃСЏ РєР°Рє РµСЃС‚СЊ.
+4. Relay РІС‹Р·С‹РІР°РµС‚ OpenAI С‡РµСЂРµР· РѕС„РёС†РёР°Р»СЊРЅС‹Р№ SDK.
+5. РћС‚РІРµС‚ `response` РІРѕР·РІСЂР°С‰Р°РµС‚СЃСЏ РєР»РёРµРЅС‚Сѓ Р±РµР· РґРѕРјРµРЅРЅРѕР№ РЅРѕСЂРјР°Р»РёР·Р°С†РёРё.
 
-## Принцип “prompt only in main app”
+## РџСЂРёРЅС†РёРї вЂњprompt only in main appвЂќ
 
-- Relay не создает свой system prompt.
-- Relay не понимает, что такое mall, agency или site classification.
-- Relay не превращает результат в доменный JSON.
-- Все это остается в основном pipeline, который может переиспользовать relay и для других задач.
+- Relay РЅРµ СЃРѕР·РґР°РµС‚ СЃРІРѕР№ system prompt.
+- Relay РЅРµ РїРѕРЅРёРјР°РµС‚, С‡С‚Рѕ С‚Р°РєРѕРµ mall, agency РёР»Рё site classification.
+- Relay РЅРµ РїСЂРµРІСЂР°С‰Р°РµС‚ СЂРµР·СѓР»СЊС‚Р°С‚ РІ РґРѕРјРµРЅРЅС‹Р№ JSON.
+- Р’СЃРµ СЌС‚Рѕ РѕСЃС‚Р°РµС‚СЃСЏ РІ РѕСЃРЅРѕРІРЅРѕРј pipeline, РєРѕС‚РѕСЂС‹Р№ РјРѕР¶РµС‚ РїРµСЂРµРёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ relay Рё РґР»СЏ РґСЂСѓРіРёС… Р·Р°РґР°С‡.
 
-## Конфигурация
+## РљРѕРЅС„РёРіСѓСЂР°С†РёСЏ
 
-Обязательные env:
+РћР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ env:
 - `OPENAI_API_KEY`
 - `GATEWAY_AUTH_TOKEN`
 - `DEFAULT_OPENAI_MODEL`
 - `LOG_LEVEL`
 
-Дополнительные env:
+Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ env:
 - timeout/retry
 - payload limit
 - rate limit
 - Sentry
 - allowed source IPs
 
-## Безопасность
+## Р‘РµР·РѕРїР°СЃРЅРѕСЃС‚СЊ
 
-- `Authorization` не логируется.
-- Полный prompt не логируется.
-- Размер входного payload ограничен.
-- Можно ограничить доступ по IP через `ALLOWED_SOURCE_IPS`.
+- `Authorization` РЅРµ Р»РѕРіРёСЂСѓРµС‚СЃСЏ.
+- РџРѕР»РЅС‹Р№ prompt РЅРµ Р»РѕРіРёСЂСѓРµС‚СЃСЏ.
+- Р Р°Р·РјРµСЂ РІС…РѕРґРЅРѕРіРѕ payload РѕРіСЂР°РЅРёС‡РµРЅ.
+- РњРѕР¶РЅРѕ РѕРіСЂР°РЅРёС‡РёС‚СЊ РґРѕСЃС‚СѓРї РїРѕ IP С‡РµСЂРµР· `ALLOWED_SOURCE_IPS`.
 
-## Наблюдаемость
+## РќР°Р±Р»СЋРґР°РµРјРѕСЃС‚СЊ
 
 - `GET /health`
 - `GET /ready`
 - `GET /metrics`
-- JSON-логи с `request_id`, `status_code`, `model`, `duration_ms`
+- JSON-Р»РѕРіРё СЃ `request_id`, `status_code`, `model`, `duration_ms`
 
-## Docker-модель
+## Docker-РјРѕРґРµР»СЊ
 
-- `gateway` — основной контейнер сервиса
-- `tests` — контейнер для прогона `pytest`
+- `gateway` вЂ” РѕСЃРЅРѕРІРЅРѕР№ РєРѕРЅС‚РµР№РЅРµСЂ СЃРµСЂРІРёСЃР°
+- `tests` вЂ” РєРѕРЅС‚РµР№РЅРµСЂ РґР»СЏ РїСЂРѕРіРѕРЅР° `pytest`
 
-Сервис рассчитан на запуск через Docker Compose и обновление через `git pull origin main` + `docker compose up -d --build gateway`.
+РЎРµСЂРІРёСЃ СЂР°СЃСЃС‡РёС‚Р°РЅ РЅР° Р·Р°РїСѓСЃРє С‡РµСЂРµР· Docker Compose Рё РѕР±РЅРѕРІР»РµРЅРёРµ С‡РµСЂРµР· `git pull origin main` + `docker compose up -d --build gateway`.
+
+

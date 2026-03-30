@@ -7,32 +7,26 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from app.metrics import MetricsService
-from app.schemas import OpenAIChatCompletionsRequest
+from app.schemas import OpenAIResponsesRequest
 
 
 class FakeOpenAIClient:
     def __init__(self) -> None:
         self.response_payload: dict[str, Any] = {
-            "id": "chatcmpl-test",
-            "object": "chat.completion",
+            "id": "resp-test",
+            "object": "response",
             "model": "gpt-5-mini",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": '{"site_verdict":"official_real_estate_agency_site","detected_city":"Краснодар","confidence":0.94,"reason":"ok"}',
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
+            "output_text": (
+                '{"site_verdict":"official_real_estate_agency_site","detected_city":"Краснодар",'
+                '"confidence":0.94,"reason":"ok"}'
+            ),
         }
         self.model_name = "gpt-5-mini"
         self.exception: Exception | None = None
 
-    async def relay_chat_completions(
+    async def relay_responses(
         self,
-        payload: OpenAIChatCompletionsRequest,
+        payload: OpenAIResponsesRequest,
     ) -> tuple[dict[str, Any], str]:
         if self.exception is not None:
             raise self.exception

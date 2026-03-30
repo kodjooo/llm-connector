@@ -1,31 +1,29 @@
-ТЗ: thin relay сервис для OpenAI
+LLM Gateway Service Spec
 
-1. Назначение
-Сервис размещается на втором сервере в разрешенной юрисдикции и нужен только для сетевого доступа к OpenAI API. Он не хранит бизнес-правила классификации, не формирует prompt и не интерпретирует ответ модели.
+Purpose:
+- Accept a ready-to-send OpenAI Responses API payload from the main pipeline.
+- Forward it to OpenAI from an allowed jurisdiction.
+- Return the raw OpenAI JSON response unchanged.
 
-2. Endpoint
-POST /v1/openai/chat-completions
+Endpoint:
+- `POST /v1/openai/responses`
 
-3. Авторизация
-- Заголовок: Authorization: Bearer <token>
-- Токен хранится в relay как `GATEWAY_AUTH_TOKEN`
-- Без корректного токена сервис возвращает 401
+Authorization:
+- Require `Authorization: Bearer <GATEWAY_AUTH_TOKEN>`.
 
-4. Входной payload
-Relay принимает OpenAI-совместимый JSON для `chat/completions`.
-Обязательные поля:
-- `messages`
-Опциональные поля:
-- `model`
-- `response_format`
-- и другие допустимые поля OpenAI
+Request contract:
+- Accept a nearly transparent OpenAI Responses API payload.
+- Require at least `input`.
+- Allow optional `model`; if omitted, use `DEFAULT_OPENAI_MODEL`.
+- Pass through extra OpenAI fields as-is.
 
-Пример:
+Expected payload example:
+```json
 {
   "model": "gpt-5-mini",
-  "response_format": {
-    "type": "json_schema",
-    "json_schema": {
+  "text": {
+    "format": {
+      "type": "json_schema",
       "name": "SiteClassification",
       "schema": {
         "type": "object",
@@ -39,35 +37,30 @@ Relay принимает OpenAI-совместимый JSON для `chat/complet
       }
     }
   },
-  "messages": [
-    {"role": "system", "content": "Определи тип сайта по контексту и верни только JSON."},
-    {"role": "user", "content": "{\"domain\":\"verno.pro\",\"expected_city\":\"Краснодар\"}"}
+  "input": [
+    {
+      "role": "system",
+      "content": [
+        {"type": "input_text", "text": "Return only JSON."}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "{\"domain\":\"verno.pro\"}"}
+      ]
+    }
   ]
 }
+```
 
-5. Выходной payload
-Relay возвращает raw JSON от OpenAI `chat.completion` без преобразования в доменные поля.
+Response contract:
+- Return raw OpenAI `response` JSON.
+- Do not add business-level normalization.
 
-6. Ошибки
-- 400: невалидный payload
-- 401: неверный токен
-- 429: локальный rate limit
-- 502: upstream error / invalid upstream response
-- 504: upstream timeout
-
-7. Ограничения и защита
-- Не логировать Bearer token
-- Не логировать полный prompt
-- Ограничивать размер payload
-- Поддерживать allowlist IP
-
-8. Эксплуатация
-- Healthcheck: GET /health
-- Readiness: GET /ready
-- Метрики: GET /metrics
-- Retry/backoff к OpenAI через env-конфиг
-
-9. Критерий приемки
-- Основной pipeline может отправить в relay тот же payload, который раньше отправлял прямо в OpenAI
-- Relay успешно проксирует запрос и возвращает OpenAI-совместимый ответ
-- Бизнес-проект сам парсит этот ответ без дублирования prompt-логики на втором сервере
+Error codes:
+- `400` invalid_request
+- `401` unauthorized
+- `429` rate_limit_exceeded
+- `502` upstream_invalid_response
+- `504` upstream_timeout

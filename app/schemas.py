@@ -5,16 +5,16 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class OpenAIChatCompletionsRequest(BaseModel):
+class OpenAIResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str | None = Field(default=None, min_length=1, max_length=100)
-    messages: list[dict[str, Any]] = Field(min_length=1)
+    input: list[dict[str, Any]] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_messages(self) -> "OpenAIChatCompletionsRequest":
-        if not self.messages:
-            raise ValueError("messages must not be empty")
+    def validate_input(self) -> "OpenAIResponsesRequest":
+        if not self.input:
+            raise ValueError("input must not be empty")
         return self
 
     def to_openai_payload(self, default_model: str) -> dict[str, Any]:

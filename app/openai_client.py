@@ -7,13 +7,13 @@ from openai import APITimeoutError, AsyncOpenAI, OpenAIError, RateLimitError as 
 
 from app.config import Settings
 from app.errors import UpstreamError, UpstreamTimeoutError
-from app.schemas import OpenAIChatCompletionsRequest
+from app.schemas import OpenAIResponsesRequest
 
 
 class OpenAIClientProtocol(Protocol):
-    async def relay_chat_completions(
+    async def relay_responses(
         self,
-        payload: OpenAIChatCompletionsRequest,
+        payload: OpenAIResponsesRequest,
     ) -> tuple[dict[str, Any], str]:
         ...
 
@@ -23,9 +23,9 @@ class OpenAIRelayClient:
         self.settings = settings
         self.client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=settings.openai_timeout_seconds)
 
-    async def relay_chat_completions(
+    async def relay_responses(
         self,
-        payload: OpenAIChatCompletionsRequest,
+        payload: OpenAIResponsesRequest,
     ) -> tuple[dict[str, Any], str]:
         target_payload = payload.to_openai_payload(self.settings.default_openai_model)
         target_model = str(target_payload["model"])
@@ -33,7 +33,7 @@ class OpenAIRelayClient:
 
         for attempt in range(self.settings.openai_max_retries):
             try:
-                response = await self.client.chat.completions.create(**target_payload)
+                response = await self.client.responses.create(**target_payload)
                 return response.model_dump(mode="json"), target_model
             except APITimeoutError as error:
                 last_error = error

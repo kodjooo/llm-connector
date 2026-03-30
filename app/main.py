@@ -16,7 +16,7 @@ from app.logging_utils import configure_logging
 from app.metrics import MetricsService
 from app.openai_client import OpenAIRelayClient
 from app.rate_limit import InMemoryRateLimiter
-from app.schemas import ErrorResponse, OpenAIChatCompletionsRequest
+from app.schemas import ErrorResponse, OpenAIResponsesRequest
 from app.service import OpenAIRelayService
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ def create_app(
     configure_logging(current_settings.log_level)
     _configure_sentry(current_settings)
 
-    app = FastAPI(title="LLM Gateway", version="1.1.0")
+    app = FastAPI(title="LLM Gateway", version="1.2.0")
     app.state.settings = current_settings
     app.state.metrics = metrics or MetricsService()
     app.state.rate_limiter = InMemoryRateLimiter(
@@ -132,9 +132,9 @@ def create_app(
             raise BadRequestError("Metrics endpoint is disabled", code="metrics_disabled")
         return request.app.state.metrics.render()
 
-    @app.post("/v1/openai/chat-completions")
-    async def relay_chat_completions(
-        payload: OpenAIChatCompletionsRequest,
+    @app.post("/v1/openai/responses")
+    async def relay_responses(
+        payload: OpenAIResponsesRequest,
         request: Request,
         service: OpenAIRelayService = Depends(get_service),
     ):
@@ -142,7 +142,7 @@ def create_app(
         _enforce_rate_limit(request)
         request.app.state.metrics.requests_total.inc()
         _log_sanitized_payload(request, payload)
-        result = await service.relay_chat_completions(payload)
+        result = await service.relay_responses(payload)
         return JSONResponse(status_code=200, content=result)
 
     return app
@@ -166,21 +166,21 @@ def _enforce_rate_limit(request: Request) -> None:
         raise RateLimitError()
 
 
-def _log_sanitized_payload(request: Request, payload: OpenAIChatCompletionsRequest) -> None:
+def _log_sanitized_payload(request: Request, payload: OpenAIResponsesRequest) -> None:
     settings: Settings = request.app.state.settings
     logger.info(
-        "Получен запрос на relay chat completions.",
+        "Получен запрос на relay responses.",
         extra={
             "request_id": getattr(request.state, "request_id", None),
             "model": payload.model or settings.default_openai_model,
-            "message_count": len(payload.messages),
+            "input_items": len(payload.input),
         },
     )
 
     if settings.log_level.upper() == "DEBUG":
         logger.debug(
-            "Отладочные данные relay-запроса: message_count=%s",
-            len(payload.messages),
+            "Отладочные данные relay-запроса: input_items=%s",
+            len(payload.input),
             extra={"request_id": getattr(request.state, "request_id", None)},
         )
 
