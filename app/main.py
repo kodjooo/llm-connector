@@ -14,10 +14,10 @@ from app.config import Settings, get_settings
 from app.errors import BadRequestError, GatewayError, RateLimitError, UnauthorizedError
 from app.logging_utils import configure_logging
 from app.metrics import MetricsService
-from app.openai_client import OpenAIClassificationClient
+from app.openai_client import OpenAIRelayClient
 from app.rate_limit import InMemoryRateLimiter
-from app.schemas import ErrorResponse, SiteClassificationRequest
-from app.service import SiteClassificationService
+from app.schemas import ErrorResponse, OpenAIChatCompletionsRequest
+from app.service import OpenAIRelayService
 
 logger = logging.getLogger(__name__)
 
@@ -68,21 +68,21 @@ class PayloadLimitMiddleware(BaseHTTPMiddleware):
 def create_app(
     settings: Settings | None = None,
     metrics: MetricsService | None = None,
-    openai_client: OpenAIClassificationClient | None = None,
+    openai_client: OpenAIRelayClient | None = None,
 ) -> FastAPI:
     current_settings = settings or get_settings()
     configure_logging(current_settings.log_level)
     _configure_sentry(current_settings)
 
-    app = FastAPI(title="LLM Gateway", version="1.0.0")
+    app = FastAPI(title="LLM Gateway", version="1.1.0")
     app.state.settings = current_settings
     app.state.metrics = metrics or MetricsService()
     app.state.rate_limiter = InMemoryRateLimiter(
         limit=current_settings.rate_limit_requests,
         window_seconds=current_settings.rate_limit_window_seconds,
     )
-    app.state.openai_client = openai_client or OpenAIClassificationClient(current_settings)
-    app.state.classification_service = SiteClassificationService(app.state.openai_client, app.state.metrics)
+    app.state.openai_client = openai_client or OpenAIRelayClient(current_settings)
+    app.state.relay_service = OpenAIRelayService(app.state.openai_client, app.state.metrics)
 
     app.add_middleware(RequestContextMiddleware, settings=current_settings)
     app.add_middleware(PayloadLimitMiddleware, settings=current_settings)
@@ -115,8 +115,8 @@ def create_app(
             ).model_dump(),
         )
 
-    def get_service(request: Request) -> SiteClassificationService:
-        return request.app.state.classification_service
+    def get_service(request: Request) -> OpenAIRelayService:
+        return request.app.state.relay_service
 
     @app.get("/health")
     async def healthcheck() -> dict[str, str]:
@@ -132,18 +132,18 @@ def create_app(
             raise BadRequestError("Metrics endpoint is disabled", code="metrics_disabled")
         return request.app.state.metrics.render()
 
-    @app.post("/v1/site-classification")
-    async def site_classification(
-        payload: SiteClassificationRequest,
+    @app.post("/v1/openai/chat-completions")
+    async def relay_chat_completions(
+        payload: OpenAIChatCompletionsRequest,
         request: Request,
-        service: SiteClassificationService = Depends(get_service),
+        service: OpenAIRelayService = Depends(get_service),
     ):
         _authorize_request(request)
         _enforce_rate_limit(request)
         request.app.state.metrics.requests_total.inc()
         _log_sanitized_payload(request, payload)
-        result = await service.classify(payload)
-        return JSONResponse(status_code=200, content=result.model_dump())
+        result = await service.relay_chat_completions(payload)
+        return JSONResponse(status_code=200, content=result)
 
     return app
 
@@ -166,25 +166,21 @@ def _enforce_rate_limit(request: Request) -> None:
         raise RateLimitError()
 
 
-def _log_sanitized_payload(request: Request, payload: SiteClassificationRequest) -> None:
+def _log_sanitized_payload(request: Request, payload: OpenAIChatCompletionsRequest) -> None:
     settings: Settings = request.app.state.settings
-    excerpt_preview = payload.input.homepage_excerpt[: settings.debug_log_excerpt_chars]
-
     logger.info(
-        "Получен запрос на классификацию сайта.",
+        "Получен запрос на relay chat completions.",
         extra={
             "request_id": getattr(request.state, "request_id", None),
             "model": payload.model or settings.default_openai_model,
+            "message_count": len(payload.messages),
         },
     )
 
     if settings.log_level.upper() == "DEBUG":
         logger.debug(
-            (
-                "Отладочные данные запроса: "
-                f"domain={payload.input.domain}, expected_city={payload.input.expected_city}, "
-                f"expected_entity_type={payload.input.expected_entity_type}, excerpt_preview={excerpt_preview}"
-            ),
+            "Отладочные данные relay-запроса: message_count=%s",
+            len(payload.messages),
             extra={"request_id": getattr(request.state, "request_id", None)},
         )
 

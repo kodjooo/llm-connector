@@ -1,144 +1,100 @@
-ТЗ: сервис LLM gateway для site classification
+ТЗ: тонкий LLM relay для OpenAI
 
 1. Цель
-Сервис нужен для того, чтобы основной pipeline на прод-сервере не ходил в OpenAI напрямую.
-Основной сервер должен отправлять в gateway только данные для классификации спорного сайта, а gateway уже сам обращается в OpenAI из разрешенной юрисдикции и возвращает нормализованный результат.
+Сервис нужен для того, чтобы основной pipeline не ходил в OpenAI напрямую с прод-сервера. Бизнес-логика, prompt и разбор результата остаются в основном проекте. Gateway выступает только как transport-слой.
 
 2. Что должен делать сервис
-- Принимать HTTP POST запросы от основного pipeline.
-- Проверять Bearer-токен доступа.
-- Вызывать OpenAI Chat Completions с заданной моделью.
-- Возвращать унифицированный JSON-ответ с результатом site classification.
-- Логировать ошибки, таймауты и входные request_id без хранения чувствительных данных дольше необходимого.
-- Поддерживать healthcheck для мониторинга.
+- Принимать HTTP POST-запросы от доверенного pipeline.
+- Проверять `Authorization: Bearer <token>`.
+- Принимать почти готовый payload для OpenAI `chat/completions`.
+- Вызывать OpenAI с заданной моделью и дополнительными полями payload без изменения prompt.
+- Возвращать raw JSON-ответ OpenAI в совместимом формате.
+- Логировать request_id, код ответа, длительность и модель без утечки чувствительных данных.
+- Поддерживать health/readiness и endpoint метрик.
 
 3. Обязательный endpoint
-POST /v1/site-classification
+`POST /v1/openai/chat-completions`
 
 4. Healthcheck
-GET /health
-Ответ 200:
-{
-  "status": "ok"
-}
+`GET /health` и `GET /ready` должны возвращать `{"status":"ok"}`.
 
 5. Авторизация
-- Основной способ: заголовок Authorization: Bearer <token>
-- Токен хранится на стороне pipeline в переменной SITE_CLASSIFICATION_LLM_GATEWAY_API_KEY
-- Без корректного токена сервис возвращает 401
+- Основной способ: `Authorization: Bearer <token>`.
+- Токен хранится на стороне relay как `GATEWAY_AUTH_TOKEN`.
+- Тот же токен хранится на стороне pipeline как `SITE_CLASSIFICATION_LLM_GATEWAY_API_KEY`.
+- Без валидного токена сервис возвращает `401`.
 
-6. Входной JSON для POST /v1/site-classification
+6. Входной JSON
+Сервис принимает OpenAI-совместимый payload для `chat/completions`.
+Минимум:
+
+```json
 {
-  "schema": "site_classification_v1",
   "model": "gpt-5-mini",
-  "input": {
-    "expected_city": "Краснодар",
-    "expected_entity_type": "real_estate_agency",
-    "domain": "verno.pro",
-    "serp": {
-      "title": "VERNO",
-      "snippet": "Недвижимость в Краснодаре",
-      "url": "https://verno.pro/",
-      "position": 3
-    },
-    "serp_screening": {
-      "score": 2.5,
-      "reason": "serp_needs_homepage_verification",
-      "requires_verification": true
-    },
-    "homepage_screening": {
-      "score": 5.0,
-      "reason": null
-    },
-    "homepage_excerpt": "Каталог объектов..."
-  }
+  "messages": [
+    {"role": "system", "content": "Определи тип сайта по контексту и верни только JSON."},
+    {"role": "user", "content": "{\"domain\":\"verno.pro\",\"expected_city\":\"Краснодар\"}"}
+  ]
 }
+```
+
+Дополнительные поля вроде `response_format`, `temperature`, `top_p` и т.п. должны передаваться прозрачно.
 
 7. Выходной JSON
-Успешный ответ 200:
-{
-  "site_verdict": "official_real_estate_agency_site",
-  "detected_city": "Краснодар",
-  "confidence": 0.94,
-  "reason": "Сайт агентства недвижимости с каталогом объектов и контактами.",
-  "provider": "openai",
-  "model": "gpt-5-mini"
-}
+Сервис возвращает raw JSON OpenAI `chat.completion` без дополнительной нормализации бизнес-полей.
 
-8. Допустимые значения site_verdict
-- official_mall_site
-- mall_tenant_site
-- official_real_estate_agency_site
-- developer_site
-- aggregator_or_directory
-- media_or_article
-- uncertain
-- null
-
-9. Ошибки
-- 400: невалидный JSON или неизвестная schema
-- 401: неверный или отсутствующий токен
-- 429: локальный rate limit gateway
-- 502: OpenAI вернул ошибку, которую gateway не смог обработать
-- 504: таймаут вызова OpenAI
+8. Ошибки
+- `400` — невалидный JSON или некорректный payload.
+- `401` — отсутствующий или неверный токен.
+- `429` — локальный rate limit.
+- `502` — OpenAI вернул upstream-ошибку или некорректный ответ.
+- `504` — timeout при вызове OpenAI.
 
 Формат ошибки:
+
+```json
 {
   "error": {
     "code": "upstream_timeout",
     "message": "OpenAI request timed out"
   }
 }
+```
 
-10. Требования к логике gateway
-- Gateway не должен возвращать сырой ответ OpenAI.
-- Gateway должен сам парсить ответ модели и отдавать только нормализованный JSON.
-- Gateway должен валидировать, что confidence приведен к float, а site_verdict входит в допустимый список.
-- При невалидном ответе OpenAI gateway должен вернуть 502.
-- Таймаут одного вызова OpenAI: 45 секунд.
-- Повторы на временных ошибках OpenAI: до 3 попыток с backoff 1s, 2s, 3s.
+9. Требования к логике relay
+- Relay не должен менять `messages`, `response_format` или другие OpenAI-поля.
+- Relay не должен добавлять собственный system prompt.
+- Relay может подставить `DEFAULT_OPENAI_MODEL`, только если клиент не прислал `model`.
+- Должны быть retry и timeout для upstream OpenAI.
 
-11. Требования к безопасности
-- Не логировать Authorization header.
-- Не логировать полный homepage_excerpt целиком; максимум первые 500 символов в debug.
-- Ограничить входной payload по размеру, например 32 KB.
-- Разрешить доступ только с IP основного сервера или через private network/VPN, если возможно.
+10. Безопасность
+- Не логировать `Authorization`.
+- Не логировать полный пользовательский prompt целиком.
+- Ограничить размер входного payload.
+- Поддержать allowlist IP через env.
 
-12. Требования к развертыванию
-- Небольшой отдельный сервис на FastAPI/Flask.
-- Отдельный env:
-  - OPENAI_API_KEY
-  - GATEWAY_AUTH_TOKEN
-  - DEFAULT_OPENAI_MODEL
-  - LOG_LEVEL
-- Развертывание в стране/юрисдикции, где OpenAI API доступен.
-- Запуск через systemd или Docker Compose.
+11. Развертывание
+- FastAPI + Docker Compose.
+- Отдельный сервер или VPS в разрешенной юрисдикции.
+- Обязательные env:
+  - `OPENAI_API_KEY`
+  - `GATEWAY_AUTH_TOKEN`
+  - `DEFAULT_OPENAI_MODEL`
+  - `LOG_LEVEL`
 
-13. Требования к наблюдаемости
+12. Наблюдаемость
 - Метрики:
-  - requests_total
-  - requests_failed_total
-  - upstream_openai_latency_ms
-  - upstream_openai_errors_total
+  - `requests_total`
+  - `requests_failed_total`
+  - `upstream_openai_latency_ms`
+  - `upstream_openai_errors_total`
 - Логи:
-  - request_id
-  - status_code
-  - model
-  - duration_ms
-- Желательно добавить Sentry или аналогичный error tracker.
+  - `request_id`
+  - `status_code`
+  - `model`
+  - `duration_ms`
 
-14. Требования к совместимости с текущим pipeline
-- Pipeline уже умеет работать в режиме SITE_CLASSIFICATION_LLM_PROVIDER=gateway.
-- Для включения gateway достаточно выставить:
-  - SITE_CLASSIFICATION_LLM_ENABLED=true
-  - SITE_CLASSIFICATION_LLM_PROVIDER=gateway
-  - SITE_CLASSIFICATION_LLM_GATEWAY_URL=https://<gateway-host>
-  - SITE_CLASSIFICATION_LLM_GATEWAY_API_KEY=<token>
-- OPENAI_API_KEY на основном прод-сервере при этом не нужен для site classification.
-
-15. Критерии приемки
-- Основной pipeline успешно вызывает gateway вместо OpenAI напрямую.
-- На основном проде отсутствуют ошибки OpenAI 403 unsupported_country_region_territory.
-- Gateway корректно возвращает классификацию минимум для 10 тестовых доменов.
-- При временном падении OpenAI gateway делает retry и не ломает pipeline.
-- При недоступности gateway pipeline логирует предупреждение и продолжает работу без LLM verdict.
+13. Совместимость с текущим pipeline
+- Основной pipeline должен уметь переключаться на `SITE_CLASSIFICATION_LLM_PROVIDER=gateway`.
+- При этом prompt и схема ответа должны жить только в основном проекте.
+- Gateway должен быть переиспользуемым и для других LLM-задач, не только для site classification.

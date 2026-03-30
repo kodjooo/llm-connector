@@ -1,135 +1,64 @@
-# Архитектура LLM gateway
+# Архитектура LLM relay
 
-## Текущее состояние
+## Назначение
 
-### Этап 1. Подготовка каркаса сервиса
+`llm-connector` — это тонкий HTTP relay для OpenAI `chat/completions`. Он нужен, чтобы основной pipeline мог сохранить всю prompt-логику у себя, а на второй сервер вынести только сетевой доступ к OpenAI.
 
-- Стек сервиса зафиксирован на FastAPI + Uvicorn.
-- Проект работает в модели Docker-first:
-- основной сценарий запуска через `docker-compose.yml`;
-- локальное окружение вне контейнеров не используется;
-- контейнер `gateway` поднимает HTTP-сервис на порту `8000`;
-- контейнер `tests` зарезервирован для запуска автотестов через тот же образ.
-- Конфигурация вынесена в `app/config.py` и читается из `.env`.
-- Базовые переменные окружения определены в `.env.example` и `.env`.
-- Для секретов и токенов подготовлен `.gitignore`, чтобы `.env` не попадал в Git.
-- Базовая структура приложения разделена на:
-- `app/main.py` — создание FastAPI-приложения и wiring зависимостей;
-- `app/config.py` — конфигурация;
-- `app/schemas.py` — схемы входа и выхода;
-- `app/errors.py` — доменные ошибки gateway;
-- `app/openai_client.py` — клиент OpenAI;
-- `app/service.py` — бизнес-логика классификации;
-- `app/metrics.py` и `app/rate_limit.py` — эксплуатационные компоненты.
+## Слои
 
-### Этап 2. Базовые endpoint и контракт API
+- `app/main.py` — FastAPI-приложение, auth, middleware, health/readiness/metrics, endpoint relay.
+- `app/schemas.py` — минимальная валидация входного OpenAI payload и error schema.
+- `app/openai_client.py` — обертка над OpenAI SDK с timeout/retry.
+- `app/service.py` — тонкий сервисный слой, который только вызывает upstream и пишет метрики.
+- `app/rate_limit.py` и `app/metrics.py` — локальный rate limit и prometheus-метрики.
 
-- Реализованы обязательные endpoint:
-- `GET /health` — базовый healthcheck;
-- `GET /ready` — readiness для Docker и оркестрации;
-- `POST /v1/site-classification` — основной endpoint классификации;
-- `GET /metrics` — endpoint метрик.
-- Входной контракт описан через Pydantic-схемы с запретом лишних полей.
-- Поддерживается схема `site_classification_v1`.
-- Валидируются вложенные структуры `serp`, `serp_screening`, `homepage_screening`.
-- Выходной контракт нормализован и допускает только заранее определенные значения `site_verdict`.
-- Единый формат ошибок возвращается через `ErrorResponse`.
+## Поток запроса
 
-### Этап 3. Конфигурация, безопасность и middleware
+1. Клиент присылает `POST /v1/openai/chat-completions`.
+2. Приложение проверяет Bearer token и IP allowlist.
+3. Payload валидируется минимально: должны быть `messages`, прочие OpenAI-поля пропускаются как есть.
+4. Relay вызывает OpenAI через официальный SDK.
+5. Ответ `chat.completion` возвращается клиенту без доменной нормализации.
 
-- Bearer-авторизация проверяется в `POST /v1/site-classification` по `GATEWAY_AUTH_TOKEN`.
-- Middleware добавляют:
-- `request_id` в каждый запрос и ответ;
-- измерение времени обработки запроса;
-- структурированное логирование с техническими полями запроса.
-- Ограничение размера payload контролируется до чтения тела запроса через `content-length`.
-- Чувствительные данные в логах не пишутся:
-- заголовок `Authorization` не логируется;
-- `homepage_excerpt` в полном виде не логируется;
-- в debug-режиме логируется только укороченный preview excerpt.
-- Для сетевой защиты предусмотрена конфигурация `ALLOWED_SOURCE_IPS`.
+## Принцип “prompt only in main app”
 
-### Этап 4. Интеграция с OpenAI и нормализация ответа
+- Relay не создает свой system prompt.
+- Relay не понимает, что такое mall, agency или site classification.
+- Relay не превращает результат в доменный JSON.
+- Все это остается в основном pipeline, который может переиспользовать relay и для других задач.
 
-- Интеграция выполнена через официальный SDK OpenAI.
-- Модель выбирается из запроса или из `DEFAULT_OPENAI_MODEL`.
-- Gateway отправляет в OpenAI JSON-представление запроса и требует структурированный JSON-ответ.
-- Реализованы timeout и retry с backoff по конфигурации.
-- Сырой ответ OpenAI наружу не возвращается.
-- Ответ модели парсится, валидируется и преобразуется к `SiteClassificationResponse`.
-- Невалидный ответ OpenAI переводится в `502`, timeout upstream — в `504`.
+## Конфигурация
 
-### Этап 5. Наблюдаемость и эксплуатационные возможности
+Обязательные env:
+- `OPENAI_API_KEY`
+- `GATEWAY_AUTH_TOKEN`
+- `DEFAULT_OPENAI_MODEL`
+- `LOG_LEVEL`
 
-- Логирование построено в JSON-формате через `app/logging_utils.py`.
-- В логи включаются эксплуатационные поля:
-- `request_id`;
-- `status_code`;
-- `model`;
-- `duration_ms`;
-- `path`;
-- `method`.
-- Метрики реализованы в `app/metrics.py` на базе Prometheus client.
-- Gateway публикует:
-- `requests_total`;
-- `requests_failed_total`;
-- `upstream_openai_latency_ms`;
-- `upstream_openai_errors_total`.
-- Для диагностики добавлены `GET /metrics`, `GET /health`, `GET /ready`.
-- Опциональная интеграция с Sentry включается через `SENTRY_DSN`.
+Дополнительные env:
+- timeout/retry
+- payload limit
+- rate limit
+- Sentry
+- allowed source IPs
 
-### Этап 6. Локальный rate limit и отказоустойчивость
+## Безопасность
 
-- Локальный rate limit реализован в памяти через `InMemoryRateLimiter`.
-- Лимиты настраиваются переменными `RATE_LIMIT_REQUESTS` и `RATE_LIMIT_WINDOW_SECONDS`.
-- При превышении лимита gateway возвращает `429` в унифицированном формате ошибки.
-- Повторные попытки к OpenAI выполняются при временных ошибках по конфигурируемому расписанию backoff.
-- Ограничение доступа по IP задается через `ALLOWED_SOURCE_IPS`.
+- `Authorization` не логируется.
+- Полный prompt не логируется.
+- Размер входного payload ограничен.
+- Можно ограничить доступ по IP через `ALLOWED_SOURCE_IPS`.
 
-### Этап 7. Тесты
+## Наблюдаемость
 
-- Добавлен набор автоматических тестов в `tests/`.
-- Тесты покрывают:
-- `GET /health`;
-- успешный `POST /v1/site-classification`;
-- ошибки `400`, `401`, `429`, `502`, `504`;
-- payload limit;
-- метрики;
-- приемочные сценарии на 10 тестовых доменах.
-- В тестах OpenAI заменяется на fake-клиент, чтобы прогон оставался детерминированным.
-- Тесты запускаются только через Docker Compose.
+- `GET /health`
+- `GET /ready`
+- `GET /metrics`
+- JSON-логи с `request_id`, `status_code`, `model`, `duration_ms`
 
-### Этап 8. Архитектурная документация
+## Docker-модель
 
-- Документ `docs/architecture.md` обновлялся после каждого завершенного этапа и отражает текущее состояние сервиса.
-- Архитектура сервиса стабилизирована вокруг следующих слоев:
-- HTTP API и middleware;
-- конфигурация через env;
-- бизнес-сервис классификации;
-- OpenAI client;
-- rate limit;
-- метрики, логи и Sentry;
-- Docker Compose окружение.
+- `gateway` — основной контейнер сервиса
+- `tests` — контейнер для прогона `pytest`
 
-### Этап 9. Документация по запуску и развертыванию
-
-- `README.md` приведен к рабочему виду и описывает только важное:
-- запуск через Docker Desktop;
-- проверку health и readiness;
-- запуск тестов;
-- остановку;
-- пример запроса;
-- развертывание на удаленном сервере через Docker Compose;
-- параметры интеграции с pipeline.
-
-### Этап 10. Финальная проверка и подготовка к интеграции
-
-- Репозиторий инициализирован как Git-репозиторий.
-- Docker-проверка завершена успешно:
-- контейнер `gateway` поднимается;
-- `GET /health` возвращает `{"status":"ok"}`;
-- `GET /ready` возвращает `{"status":"ok"}`;
-- `GET /metrics` отдает prometheus-метрики.
-- Автотесты в Docker Compose проходят полностью: `19 passed`.
-- `.env` исключен из Git через `.gitignore`.
-- Конфигурация готова к подключению в pipeline через `SITE_CLASSIFICATION_LLM_PROVIDER=gateway`.
+Сервис рассчитан на запуск через Docker Compose и обновление через `git pull origin main` + `docker compose up -d --build gateway`.

@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -6,24 +7,36 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from app.metrics import MetricsService
-from app.schemas import OpenAIResult, SiteClassificationRequest
+from app.schemas import OpenAIChatCompletionsRequest
 
 
 class FakeOpenAIClient:
     def __init__(self) -> None:
-        self.result = OpenAIResult(
-            site_verdict="official_real_estate_agency_site",
-            detected_city="Краснодар",
-            confidence=0.94,
-            reason="Сайт агентства недвижимости с каталогом объектов и контактами.",
-        )
+        self.response_payload: dict[str, Any] = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": "gpt-5-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"site_verdict":"official_real_estate_agency_site","detected_city":"Краснодар","confidence":0.94,"reason":"ok"}',
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
         self.model_name = "gpt-5-mini"
         self.exception: Exception | None = None
 
-    async def classify_site(self, payload: SiteClassificationRequest) -> tuple[OpenAIResult, str]:
+    async def relay_chat_completions(
+        self,
+        payload: OpenAIChatCompletionsRequest,
+    ) -> tuple[dict[str, Any], str]:
         if self.exception is not None:
             raise self.exception
-        return self.result, self.model_name
+        return self.response_payload, self.model_name
 
 
 @pytest.fixture()
