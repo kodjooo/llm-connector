@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Protocol
 
-from openai import APITimeoutError, AsyncOpenAI, OpenAIError, RateLimitError as OpenAIRateLimitError
+import httpx
 
 from app.config import Settings
 from app.errors import UpstreamError, UpstreamTimeoutError
 from app.schemas import OpenAIResponsesRequest
+
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 
 class OpenAIClientProtocol(Protocol):
@@ -21,7 +23,6 @@ class OpenAIClientProtocol(Protocol):
 class OpenAIRelayClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=settings.openai_timeout_seconds)
 
     async def relay_responses(
         self,
@@ -33,19 +34,30 @@ class OpenAIRelayClient:
 
         for attempt in range(self.settings.openai_max_retries):
             try:
-                response = await self.client.responses.create(**target_payload)
-                return response.model_dump(mode="json"), target_model
-            except APITimeoutError as error:
+                response_payload = await self._post_responses_payload(target_payload)
+                return response_payload, target_model
+            except httpx.TimeoutException as error:
                 last_error = error
                 if attempt + 1 >= self.settings.openai_max_retries:
                     raise UpstreamTimeoutError() from error
                 await asyncio.sleep(self.settings.retry_backoff_schedule[attempt])
-            except OpenAIRateLimitError as error:
+            except httpx.HTTPStatusError as error:
                 last_error = error
-                if attempt + 1 >= self.settings.openai_max_retries:
+                status_code = error.response.status_code
+                if status_code == 429 and attempt + 1 < self.settings.openai_max_retries:
+                    await asyncio.sleep(self.settings.retry_backoff_schedule[attempt])
+                    continue
+                if status_code == 429:
                     raise UpstreamError("OpenAI rate limit exceeded") from error
-                await asyncio.sleep(self.settings.retry_backoff_schedule[attempt])
-            except OpenAIError as error:
+                if status_code >= 500 and attempt + 1 < self.settings.openai_max_retries:
+                    await asyncio.sleep(self.settings.retry_backoff_schedule[attempt])
+                    continue
+                if status_code >= 500:
+                    raise UpstreamError("OpenAI returned an upstream error") from error
+                raise UpstreamError(
+                    f"OpenAI request rejected with status {status_code}"
+                ) from error
+            except httpx.HTTPError as error:
                 last_error = error
                 if attempt + 1 >= self.settings.openai_max_retries:
                     raise UpstreamError("OpenAI returned an upstream error") from error
@@ -54,3 +66,17 @@ class OpenAIRelayClient:
                 raise UpstreamError("OpenAI returned an invalid response") from error
 
         raise UpstreamError(str(last_error) if last_error else "Unknown upstream error")
+
+    async def _post_responses_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self.settings.openai_timeout_seconds) as client:
+            response = await client.post(
+                OPENAI_RESPONSES_URL,
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            return response.json()
